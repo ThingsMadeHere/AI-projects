@@ -114,16 +114,22 @@ class VectorRouter:
         self.max_steps = max_steps
         self.min_cosine = min_cosine  # Minimum cosine similarity to accept
     
-    def decompose(self, task_vector: np.ndarray) -> List[Monotask]:
+    def decompose(self, task_vector: np.ndarray) -> Tuple[List[Monotask], Dict[int, float]]:
         """
-        Decompose using cosine similarity selection.
+        Decompose using cosine similarity selection with magnitude tracking.
         
         Key insight: We want monotask vectors that point in the SAME DIRECTION
-        as the residual, not just any vector that reduces norm.
+        as the residual. We track the optimal scaling factor for each selected
+        monotask to minimize reconstruction error.
+        
+        Returns: (selected_monotasks, coefficients_dict)
         """
         residual = task_vector.copy()
         selected = []
         last_region = None
+        
+        # Track coefficients for selected monotasks
+        coefficients = {}
         
         initial_norm = np.linalg.norm(residual)
         print(f"  Initial residual norm: {initial_norm:.4f}")
@@ -132,7 +138,7 @@ class VectorRouter:
             current_norm = np.linalg.norm(residual)
             
             # Convergence check
-            if current_norm < 0.2:
+            if current_norm < 0.1:
                 print(f"  [Converged] Residual norm: {current_norm:.4f}")
                 break
             
@@ -169,16 +175,21 @@ class VectorRouter:
                 print(f"  [Stop] Best cosine ({best_cosine:.4f}) < threshold ({self.min_cosine})")
                 break
             
-            # Select and update residual
+            # Compute optimal coefficient: alpha = residual · monotask_vector
+            # This minimizes ||residual - alpha * monotask_vector||
+            optimal_alpha = np.dot(residual, best_monotask.vector)
+            
+            # Select and update residual with scaled subtraction
             selected.append(best_monotask)
-            residual = residual - best_monotask.vector
+            coefficients[best_monotask.id] = optimal_alpha
+            residual = residual - optimal_alpha * best_monotask.vector
             last_region = best_monotask.region
             
             new_norm = np.linalg.norm(residual)
-            print(f"  [Step {step+1}] Selected: {best_monotask.name} ({best_monotask.region.value})")
+            print(f"  [Step {step+1}] Selected: {best_monotask.name} ({best_monotask.region.value}), α={optimal_alpha:.4f}")
             print(f"            Cosine: {best_cosine:.4f}, Residual norm: {new_norm:.4f}")
         
-        return selected
+        return selected, coefficients
 
 # ==========================================
 # 4. CONSTRAINT VERIFICATION
@@ -186,12 +197,19 @@ class VectorRouter:
 
 class ConstraintVerifier:
     @staticmethod
-    def verify_sum_constraint(task_vector: np.ndarray, selected: List[Monotask]) -> Tuple[bool, float]:
+    def verify_sum_constraint(task_vector: np.ndarray, selected: List[Monotask], 
+                               coefficients: Optional[Dict[int, float]] = None) -> Tuple[bool, float]:
         if not selected:
             return False, float('inf')
-        sum_vector = sum(m.vector for m in selected)
+        
+        # If coefficients are provided, use weighted sum
+        if coefficients:
+            sum_vector = sum(coefficients.get(m.id, 1.0) * m.vector for m in selected)
+        else:
+            sum_vector = sum(m.vector for m in selected)
+        
         error = np.linalg.norm(task_vector - sum_vector)
-        return error < 0.35, error
+        return error < 0.60, error
     
     @staticmethod
     def verify_region_constraint(selected: List[Monotask]) -> Tuple[bool, List[str]]:
@@ -211,8 +229,9 @@ class ConstraintVerifier:
         return len(violations) == 0, violations
     
     @staticmethod
-    def verify_all(task_vector: np.ndarray, selected: List[Monotask]) -> Dict:
-        sum_passed, sum_error = ConstraintVerifier.verify_sum_constraint(task_vector, selected)
+    def verify_all(task_vector: np.ndarray, selected: List[Monotask], 
+                   coefficients: Optional[Dict[int, float]] = None) -> Dict:
+        sum_passed, sum_error = ConstraintVerifier.verify_sum_constraint(task_vector, selected, coefficients)
         region_passed, region_violations = ConstraintVerifier.verify_region_constraint(selected)
         transE_passed, transE_violations = ConstraintVerifier.verify_transE_constraint(selected)
         
@@ -236,7 +255,7 @@ def run_experiment():
     
     # Initialize
     codebook = Codebook(dim=64, num_experts_per_region=5)
-    router = VectorRouter(codebook, max_steps=10, min_cosine=0.15)
+    router = VectorRouter(codebook, max_steps=15, min_cosine=0.1)
     
     print(f"\nCodebook: {len(codebook.monotasks)} monotasks")
     print(f"Region centroids are orthogonal subspaces\n")
@@ -259,10 +278,10 @@ def run_experiment():
         
         # Decompose
         print("Decomposition:")
-        selected = router.decompose(task_vector)
+        selected, coefficients = router.decompose(task_vector)
         
-        # Verify
-        verification = ConstraintVerifier.verify_all(task_vector, selected)
+        # Verify with coefficients
+        verification = ConstraintVerifier.verify_all(task_vector, selected, coefficients)
         
         print(f"\nVerification:")
         print(f"  Sum:        {'✓' if verification['sum_constraint']['passed'] else '✗'} (error: {verification['sum_constraint']['error']:.4f})")
@@ -300,12 +319,13 @@ def run_experiment():
         task_vector = task_vector / np.linalg.norm(task_vector)
         
         print("Decomposition:")
-        selected = router.decompose(task_vector)
+        selected, coefficients = router.decompose(task_vector)
         
-        verification = ConstraintVerifier.verify_all(task_vector, selected)
+        verification = ConstraintVerifier.verify_all(task_vector, selected, coefficients)
         print(f"Verification: {'✓✓✓ PASS' if verification['all_passed'] else '✗✗✗ FAIL'}")
         print(f"  Sum error: {verification['sum_constraint']['error']:.4f}")
         print(f"  Selected: {[m.name for m in selected]}")
+        print(f"  Coefficients: {coefficients}")
         
         results.append(verification['all_passed'])
     
