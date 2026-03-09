@@ -1,328 +1,441 @@
-"""
-Dictionary-based Complexity Analyzer using WordNet
-
-This module builds a graph from dictionary definitions where:
-- Words point to other defined words in their definitions
-- Complexity is computed recursively:
-  - Words with no defined words in definition → complexity 0
-  - Otherwise → complexity = max(children's complexity) + 1
-
-Uses lazy loading for memory efficiency.
-"""
-
-import nltk
-from nltk.corpus import wordnet
 from collections import defaultdict, deque
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Optional
 import re
 
-
-class DictionaryAnalyzer:
-    """Analyzes word complexity based on dictionary definition dependencies."""
+class DictionaryGraph:
+    """
+    Builds a knowledge graph from dictionary definitions with:
+    - Parent-Child relationships (definition dependencies)
+    - Sibling/Analogy relationships (shared parents/hypernyms)
+    - Similarity relationships (semantic overlap)
+    - Complexity scoring based on definition depth
+    """
     
     def __init__(self):
-        self.word_definitions: Dict[str, str] = {}  # Keep only first definition per word
-        self.dependency_graph: Dict[str, Set[str]] = defaultdict(set)
+        self.nodes: Dict[str, dict] = {}
         self.complexity_cache: Dict[str, int] = {}
-        self.all_defined_words: Set[str] = set()
-        self._built = False
         
-    def _ensure_built(self, max_words: int = 500):
-        """Lazy build the dictionary on first use."""
-        if not self._built:
-            self.build_dictionary(max_words)
-            self._built = True
+    def build_graph(self, custom_dict: Dict[str, str] = None):
+        """Build graph from custom dictionary or use built-in"""
+        if custom_dict is None:
+            custom_dict = self._get_builtin_dict()
         
-    def build_dictionary(self, max_words: int = 500) -> None:
-        """Build dictionary from WordNet with up to max_words entries."""
-        print(f"Building dictionary from WordNet (up to {max_words} words)...")
+        print(f"Building Dictionary Graph with {len(custom_dict)} words...")
         
-        collected = 0
-        seen_words = set()
+        # Initialize nodes
+        for word, definition in custom_dict.items():
+            word = word.lower()
+            self.nodes[word] = {
+                'definition': definition,
+                'complexity': None,
+                'children': set(),
+                'parents': set(),
+                'siblings': set(),
+                'similar': set(),
+                'hypernyms': set(),
+                'hyponyms': set()
+            }
         
-        # Use iterator to avoid loading all synsets at once
-        try:
-            all_synsets = wordnet.all_synsets()
-        except:
-            # Fallback: create minimal test dictionary
-            print("WordNet not available, using fallback dictionary...")
-            self._create_fallback_dictionary()
-            return
+        # Build dependency edges from definitions
+        for word, node in self.nodes.items():
+            def_words = set(re.findall(r'\b[a-z]+\b', node['definition'].lower()))
+            for def_word in def_words:
+                if def_word in self.nodes and def_word != word:
+                    self.nodes[word]['children'].add(def_word)
+                    self.nodes[def_word]['parents'].add(word)
         
-        for synset in all_synsets:
-            if collected >= max_words:
-                break
-                
-            # Get lemma names (words)
-            lemmas = synset.lemma_names()
-            
-            # Get definition
-            definition = synset.definition()
-            
-            # Process each lemma
-            for lemma in lemmas:
-                word = lemma.lower().replace('_', ' ')
-                
-                # Skip very short or very long words, or already seen
-                if len(word) < 2 or len(word) > 20:
-                    continue
-                if word in seen_words:
-                    continue
-                    
-                # Store only first definition per word (memory efficient)
-                self.word_definitions[word] = definition
-                self.all_defined_words.add(word)
-                seen_words.add(word)
-                collected += 1
-                    
-                if collected >= max_words:
-                    break
+        # Add explicit hypernym/hyponym relationships
+        self._add_taxonomy_relationships()
         
-        print(f"Collected {len(self.word_definitions)} unique words")
-        self._build_dependency_graph()
+        # Compute complexity
+        for word in self.nodes:
+            self._compute_complexity(word)
+        
+        # Find siblings and similar words
+        self._find_siblings()
+        self._find_similar()
+        
+        print(f"Graph built successfully with {len(self.nodes)} nodes.")
+        self._print_stats()
     
-    def _create_fallback_dictionary(self):
-        """Create a minimal fallback dictionary for testing."""
-        fallback = {
-            'cat': 'a small domesticated carnivorous mammal',
-            'dog': 'a domesticated carnivorous mammal',
-            'mat': 'a piece of coarse material placed on a floor',
-            'sat': 'past tense of sit',
-            'data': 'facts and statistics collected together for reference or analysis',
-            'fact': 'a thing that is known or proved to be true',
-            'true': 'in accordance with fact or reality',
-            'analysis': 'detailed examination of the elements or structure of something',
-            'analyze': 'examine methodically and in detail',
-            'information': 'facts provided or learned about something or someone',
-            'complex': 'consisting of many different and connected parts',
-            'system': 'a set of things working together as parts of a mechanism',
-            'simple': 'easily understood or done; presenting no difficulty',
-            'basic': 'forming an essential foundation or starting point',
-            'word': 'a single distinct meaningful element of speech or writing',
-            'definition': 'a statement of the exact meaning of a word',
-            'meaning': 'what is meant by a word, text, concept, or action',
-            'reality': 'the world or the state of things as they actually exist',
+    def _get_builtin_dict(self) -> Dict[str, str]:
+        """Built-in dictionary with common terms"""
+        return {
+            # Base concepts (C0)
+            'reality': 'the state of things as they actually exist',
             'existence': 'the fact or state of living or having objective reality',
-            'knowledge': 'facts, information, and skills acquired through experience',
+            'entity': 'a thing with distinct and independent existence',
+            'object': 'a material thing that can be seen and touched',
+            'being': 'the nature or essence of a thing',
+            
+            # Simple concepts (C1)
+            'fact': 'a thing that is known to be consistent with objective reality',
+            'truth': 'that which is true or in accordance with fact or reality',
+            'life': 'the existence of an individual human being or animal',
+            'death': 'the end of life',
+            'time': 'the indefinite continued progress of existence',
+            'space': 'a continuous area or expanse that is free or unoccupied',
+            
+            # Medium concepts (C2)
+            'knowledge': 'facts, information, and skills acquired through experience or education',
+            'information': 'facts provided or learned about something or someone',
+            'data': 'facts and statistics collected together for reference or analysis',
+            'analysis': 'detailed examination of the elements or structure of something',
+            
+            # Complex concepts (C3+)
+            'science': 'the intellectual and practical activity encompassing the systematic study of the structure and behavior of the physical and natural world through observation and experiment',
+            'philosophy': 'the study of the fundamental nature of knowledge, reality, and existence',
+            'consciousness': 'the state of being aware of and responsive to one\'s surroundings',
+            'intelligence': 'the ability to acquire and apply knowledge and skills',
+            
+            # Animals and categories
+            'animal': 'a living organism that feeds on organic matter and typically has specialized sense organs',
+            'mammal': 'an animal that nourishes its young with milk and has hair',
+            'dog': 'a domesticated carnivorous mammal',
+            'cat': 'a small domesticated carnivorous mammal',
+            'human': 'a human being; a person',
+            'person': 'a human being regarded as an individual',
+            
+            # More relationships
+            'cause': 'a person or thing that gives rise to an action or phenomenon',
+            'effect': 'a change which is a result or consequence of an action',
+            'good': 'to be desired or approved of',
+            'bad': 'of poor quality or low standard',
+        }
+    
+    def _add_taxonomy_relationships(self):
+        """Add explicit taxonomy (hypernym/hyponym) relationships"""
+        taxonomy = {
+            'dog': ['mammal', 'animal'],
+            'cat': ['mammal', 'animal'],
+            'human': ['mammal', 'animal'],
+            'mammal': ['animal'],
+            'person': ['human'],
         }
         
-        for word, definition in fallback.items():
-            self.word_definitions[word] = definition
-            self.all_defined_words.add(word)
-        
-        print(f"Created fallback dictionary with {len(self.word_definitions)} words")
-        self._build_dependency_graph()
-        
-    def _normalize_word(self, text: str) -> str:
-        """Normalize text to extract base words."""
-        # Convert to lowercase
-        text = text.lower()
-        # Remove punctuation except spaces and hyphens
-        text = re.sub(r'[^\w\s\-]', '', text)
-        return text
+        for child, parents in taxonomy.items():
+            if child in self.nodes:
+                for parent in parents:
+                    if parent in self.nodes:
+                        self.nodes[child]['hypernyms'].add(parent)
+                        self.nodes[child]['children'].add(parent)
+                        self.nodes[parent]['hyponyms'].add(child)
+                        self.nodes[parent]['parents'].add(child)
     
-    def _extract_defined_words(self, definition: str) -> Set[str]:
-        """Extract words from definition that exist in our dictionary."""
-        normalized = self._normalize_word(definition)
-        words = set(normalized.split())
-        
-        # Filter to only words we have definitions for
-        defined_in_dict = words.intersection(self.all_defined_words)
-        return defined_in_dict
-    
-    def _build_dependency_graph(self) -> None:
-        """Build graph where edges point from word to words in its definition."""
-        print("Building dependency graph...")
-        
-        for word, definition in self.word_definitions.items():
-            defined_words = self._extract_defined_words(definition)
-            # Don't include self-references
-            defined_words.discard(word)
-            self.dependency_graph[word].update(defined_words)
-        
-        print(f"Built graph with {len(self.dependency_graph)} nodes")
-    
-    def compute_complexity(self, word: str, memo: Optional[Dict[str, int]] = None) -> int:
-        """
-        Compute complexity of a word recursively.
-        
-        - If word has no dependencies (no defined words in definition) → complexity 0
-        - Otherwise → complexity = max(dependencies' complexity) + 1
-        
-        Uses memoization to avoid recomputation.
-        """
-        if memo is None:
-            memo = {}
-        
-        if word in memo:
-            return memo[word]
-        
-        # Base case: word not in dictionary or no dependencies
-        if word not in self.dependency_graph or len(self.dependency_graph[word]) == 0:
-            memo[word] = 0
-            return 0
-        
-        # Prevent infinite recursion for circular dependencies
-        memo[word] = -1  # Mark as being computed
-        
-        max_child_complexity = 0
-        for child in self.dependency_graph[word]:
-            child_complexity = self.compute_complexity(child, memo)
-            if child_complexity >= 0:  # Skip cycles
-                max_child_complexity = max(max_child_complexity, child_complexity)
-        
-        # If we detected a cycle, use 0 for that path
-        if max_child_complexity == -1:
-            max_child_complexity = 0
-        
-        complexity = max_child_complexity + 1
-        memo[word] = complexity
-        return complexity
-    
-    def get_word_complexity(self, word: str) -> int:
-        """Get cached complexity for a word, computing if necessary."""
-        word = word.lower().strip()
+    def _compute_complexity(self, word: str, visited: Set[str] = None) -> int:
+        """Compute complexity recursively: max(children's complexity) + 1"""
+        if visited is None:
+            visited = set()
         
         if word in self.complexity_cache:
             return self.complexity_cache[word]
         
-        complexity = self.compute_complexity(word)
+        if word in visited:
+            return 0
+        
+        visited.add(word)
+        
+        node = self.nodes.get(word)
+        if not node:
+            return 0
+        
+        children = node['children']
+        if not children:
+            complexity = 0
+        else:
+            valid_children = [c for c in children if c in self.nodes]
+            if not valid_children:
+                complexity = 0
+            else:
+                max_child = max(self._compute_complexity(c, visited.copy()) for c in valid_children)
+                complexity = max_child + 1
+        
         self.complexity_cache[word] = complexity
+        node['complexity'] = complexity
         return complexity
     
-    def analyze_text(self, text: str) -> Dict:
-        """
-        Analyze complexity of all words in a text.
+    def _find_siblings(self):
+        """Find siblings: words that share parents or hypernyms"""
+        # Group by shared parents
+        parent_to_children = defaultdict(set)
+        for word, node in self.nodes.items():
+            for parent in node['parents']:
+                if parent in self.nodes:
+                    parent_to_children[parent].add(word)
         
-        Returns dict with:
-        - word_complexities: {word: complexity}
-        - avg_complexity: average complexity
-        - max_complexity: maximum complexity found
-        - complexity_distribution: {complexity_level: count}
-        """
-        normalized = self._normalize_word(text)
-        words = [w for w in normalized.split() if len(w) > 1]
+        for parent, children in parent_to_children.items():
+            children_list = list(children)
+            for i, c1 in enumerate(children_list):
+                for c2 in children_list[i+1:]:
+                    self.nodes[c1]['siblings'].add(c2)
+                    self.nodes[c2]['siblings'].add(c1)
         
-        word_complexities = {}
-        complexity_distribution = defaultdict(int)
+        # Group by shared hypernyms
+        hyper_to_hypos = defaultdict(set)
+        for word, node in self.nodes.items():
+            for hyper in node['hypernyms']:
+                if hyper in self.nodes:
+                    hyper_to_hypos[hyper].add(word)
+        
+        for hyper, hypos in hyper_to_hypos.items():
+            hypo_list = list(hypos)
+            for i, h1 in enumerate(hypo_list):
+                for h2 in hypo_list[i+1:]:
+                    self.nodes[h1]['siblings'].add(h2)
+                    self.nodes[h2]['siblings'].add(h1)
+    
+    def _find_similar(self):
+        """Find similar words based on overlapping definitions"""
+        words_list = list(self.nodes.keys())
+        for i, w1 in enumerate(words_list):
+            for w2 in words_list[i+1:]:
+                if w2 in self.nodes[w1]['siblings']:
+                    continue
+                
+                def1 = set(re.findall(r'\b[a-z]+\b', self.nodes[w1]['definition'].lower()))
+                def2 = set(re.findall(r'\b[a-z]+\b', self.nodes[w2]['definition'].lower()))
+                
+                overlap = len(def1 & def2)
+                total = len(def1 | def2)
+                
+                if total > 0 and overlap / total > 0.2:
+                    self.nodes[w1]['similar'].add(w2)
+                    self.nodes[w2]['similar'].add(w1)
+    
+    def _print_stats(self):
+        """Print graph statistics"""
+        complexities = [n['complexity'] for n in self.nodes.values() if n['complexity'] is not None]
+        if not complexities:
+            return
+        
+        print(f"Complexity range: {min(complexities)} to {max(complexities)}")
+        most_complex = max(self.nodes.items(), key=lambda x: x[1]['complexity'])
+        print(f"Most complex word: '{most_complex[0]}' (C{most_complex[1]['complexity']})")
+        
+        total_sib = sum(len(n['siblings']) for n in self.nodes.values()) // 2
+        total_sim = sum(len(n['similar']) for n in self.nodes.values()) // 2
+        print(f"Sibling relationships: {total_sib}, Similarity relationships: {total_sim}")
+    
+    def get_word_info(self, word: str) -> Optional[dict]:
+        return self.nodes.get(word)
+    
+    def find_path(self, start: str, end: str) -> Optional[List[str]]:
+        """Find shortest path between two words using BFS"""
+        if start not in self.nodes or end not in self.nodes:
+            return None
+        
+        queue = deque([(start, [start])])
+        visited = {start}
+        
+        while queue:
+            current, path = queue.popleft()
+            if current == end:
+                return path
+            
+            neighbors = (self.nodes[current]['children'] | 
+                        self.nodes[current]['parents'] | 
+                        self.nodes[current]['siblings'])
+            
+            for neighbor in neighbors:
+                if neighbor in self.nodes and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        
+        return None
+    
+    def analyze_text(self, text: str) -> dict:
+        """Analyze text complexity"""
+        words = re.findall(r'\b[a-z]+\b', text.lower())
+        complexities = []
+        details = {}
         
         for word in words:
-            if word in self.all_defined_words:
-                complexity = self.get_word_complexity(word)
-                word_complexities[word] = complexity
-                complexity_distribution[complexity] += 1
+            if word in self.nodes and self.nodes[word]['complexity'] is not None:
+                c = self.nodes[word]['complexity']
+                complexities.append(c)
+                details[word] = c
         
-        if not word_complexities:
-            return {
-                'word_complexities': {},
-                'avg_complexity': 0,
-                'max_complexity': 0,
-                'complexity_distribution': {},
-                'words_analyzed': 0
-            }
+        if not complexities:
+            return {'avg_complexity': 0, 'max_complexity': 0, 'word_count': 0, 'word_details': {}}
         
-        complexities = list(word_complexities.values())
         return {
-            'word_complexities': word_complexities,
             'avg_complexity': sum(complexities) / len(complexities),
             'max_complexity': max(complexities),
-            'complexity_distribution': dict(complexity_distribution),
-            'words_analyzed': len(word_complexities)
+            'word_count': len(complexities),
+            'word_details': details
         }
-    
-    def get_complexity_examples(self, n_per_level: int = 5) -> Dict[int, List[Tuple[str, int]]]:
-        """Get example words for each complexity level."""
-        examples = defaultdict(list)
-        
-        # Sample words to check
-        sample_words = list(self.all_defined_words)[:1000]
-        
-        for word in sample_words:
-            complexity = self.get_word_complexity(word)
-            if len(examples[complexity]) < n_per_level:
-                examples[complexity].append((word, complexity))
-        
-        return dict(examples)
-    
-    def visualize_dependencies(self, word: str, max_depth: int = 3) -> str:
-        """Create a text visualization of word dependencies up to max_depth."""
-        lines = []
-        visited = set()
-        
-        def traverse(w: str, depth: int, indent: str = ""):
-            if depth > max_depth or w in visited:
-                return
-            
-            visited.add(w)
-            complexity = self.get_word_complexity(w)
-            lines.append(f"{indent}{w} (complexity={complexity})")
-            
-            deps = sorted(self.dependency_graph.get(w, set()))[:5]  # Limit children
-            for i, dep in enumerate(deps):
-                is_last = (i == len(deps) - 1)
-                prefix = "└─ " if is_last else "├─ "
-                traverse(dep, depth + 1, indent + ("   " if is_last else "│  "))
-        
-        traverse(word, 0)
-        return "\n".join(lines)
 
 
-def main():
-    """Demonstrate the DictionaryAnalyzer."""
-    print("=" * 70)
-    print("DICTIONARY-BASED COMPLEXITY ANALYZER")
-    print("=" * 70)
+class QuestionParser:
+    def __init__(self, graph: DictionaryGraph):
+        self.graph = graph
     
-    analyzer = DictionaryAnalyzer()
-    # Use fallback dictionary (WordNet causes OOM on this system)
-    analyzer._create_fallback_dictionary()
-    
-    print("\n" + "=" * 70)
-    print("COMPLEXITY EXAMPLES BY LEVEL")
-    print("=" * 70)
-    
-    examples = analyzer.get_complexity_examples(n_per_level=3)
-    for complexity in sorted(examples.keys()):
-        words = examples[complexity]
-        word_list = ", ".join([f"'{w}'" for w, _ in words])
-        print(f"Complexity {complexity}: {word_list}")
-    
-    print("\n" + "=" * 70)
-    print("TEXT ANALYSIS EXAMPLES")
-    print("=" * 70)
-    
-    test_texts = [
-        "The cat sat on the mat",
-        "Data analysis requires information",
-        "True facts about reality",
-        "Complex systems need knowledge"
-    ]
-    
-    for text in test_texts:
-        print(f"\nText: '{text}'")
-        result = analyzer.analyze_text(text)
-        print(f"  Words analyzed: {result['words_analyzed']}")
-        print(f"  Average complexity: {result['avg_complexity']:.2f}")
-        print(f"  Max complexity: {result['max_complexity']}")
-        if result['word_complexities']:
-            details = ", ".join([f"{w}={c}" for w, c in result['word_complexities'].items()])
-            print(f"  Word complexities: {details}")
-    
-    print("\n" + "=" * 70)
-    print("DEPENDENCY GRAPH VISUALIZATION")
-    print("=" * 70)
-    
-    demo_words = ['information', 'data', 'analyze', 'true', 'fact', 'knowledge']
-    for word in demo_words:
-        if word in analyzer.all_defined_words:
-            print(f"\n'{word}' dependencies:")
-            viz = analyzer.visualize_dependencies(word, max_depth=2)
-            print(viz)
-    
-    print("\n" + "=" * 70)
-    print("ANALYSIS COMPLETE")
-    print("=" * 70)
+    def parse(self, question: str) -> str:
+        q = question.lower().strip()
+        
+        # Most complex - check FIRST before other patterns
+        if 'most complex' in q or ('complex' in q and 'most' in q):
+            best = max(self.graph.nodes.items(), key=lambda x: x[1]['complexity'] or 0)
+            return f"The most complex word is '{best[0]}' (C{best[1]['complexity']})."
+        
+        # Definition: "What is X?" or "What is the definition of X?" (but not "most complex")
+        m = re.search(r'(?:what is the definition of|what is)\s+([a-z_]+)', q)
+        if m:
+            word = m.group(1).replace('_', ' ')
+            info = self.graph.get_word_info(word)
+            if info:
+                return f"{word.capitalize()}: {info['definition']} (Complexity: C{info['complexity']})"
+            return f"I don't have '{word}' in my dictionary."
+        
+        # Complexity: "How complex is X?"
+        m = re.search(r'(?:how complex is|complexity of)\s+([a-z_]+)', q)
+        if m:
+            word = m.group(1).replace('_', ' ')
+            info = self.graph.get_word_info(word)
+            if info and info['complexity'] is not None:
+                return f"'{word}' has complexity C{info['complexity']}."
+            return f"I don't know the complexity of '{word}'."
+        
+        # Relationships: "How is X related to Y?"
+        m = re.search(r'how is\s+([a-z_]+)\s+related to\s+([a-z_]+)', q)
+        if m:
+            w1, w2 = m.group(1).replace('_', ' '), m.group(2).replace('_', ' ')
+            info1, info2 = self.graph.get_word_info(w1), self.graph.get_word_info(w2)
+            if info1 and info2:
+                rels = []
+                if w2 in info1['children']: rels.append(f"'{w1}' uses '{w2}' in its definition")
+                if w2 in info1['parents']: rels.append(f"'{w1}' helps define '{w2}'")
+                if w2 in info1['siblings']: rels.append(f"They share categories")
+                if w2 in info1['similar']: rels.append(f"They are semantically similar")
+                if w2 in info1['hypernyms']: rels.append(f"'{w2}' is a broader category")
+                if w2 in info1['hyponyms']: rels.append(f"'{w2}' is more specific")
+                
+                if rels:
+                    return "; ".join(rels) + "."
+                
+                path = self.graph.find_path(w1, w2)
+                if path and len(path) <= 4:
+                    return f"Connected via: {' → '.join(path)}"
+            return f"No clear relationship found."
+        
+        # Is-a: "Is X a Y?" (but not "is to") - handle "an" as well as "a"
+        if ' is to ' not in q:
+            m = re.search(r'\bis\s+([a-z_]+)\s+a(?:n)?\s+([a-z_]+)', q)
+            if m:
+                w1, w2 = m.group(1).replace('_', ' '), m.group(2).replace('_', ' ')
+                info1, info2 = self.graph.get_word_info(w1), self.graph.get_word_info(w2)
+                if info1 and info2:
+                    if w2 in info1['hypernyms'] or w2 in info1['children']:
+                        return f"Yes, '{w1}' is a type of '{w2}'."
+                    if w1 in info2['hyponyms']:
+                        return f"Yes, '{w1}' is a type of '{w2}'."
+                    if w2 in info1['siblings']:
+                        return f"They are in the same category."
+                return f"I cannot confirm that relationship."
+        
+        # Examples: "Give me an example of X"
+        m = re.search(r'(?:give me an example of|examples? of)\s+([a-z_]+)', q)
+        if m:
+            word = m.group(1).replace('_', ' ')
+            info = self.graph.get_word_info(word)
+            if info and info['hyponyms']:
+                examples = list(info['hyponyms'])[:5]
+                return f"Examples of '{word}': {', '.join(examples)}."
+            return f"I don't have specific examples for '{word}'."
+        
+        # Path: "Explain the path from X to Y"
+        m = re.search(r'(?:explain the path from|path from)\s+([a-z_]+)\s+to\s+([a-z_]+)', q)
+        if m:
+            w1, w2 = m.group(1).replace('_', ' '), m.group(2).replace('_', ' ')
+            path = self.graph.find_path(w1, w2)
+            if path:
+                return f"Path: {' → '.join(path)}"
+            return f"No path found."
+        
+        # Analogy: "X is to Y as A is to B"
+        m = re.search(r'([a-z_]+)\s+is to\s+([a-z_]+)\s+as\s+([a-z_]+)\s+is to\s+([a-z_]+)', q)
+        if m:
+            w1, w2, w3, w4 = [x.replace('_', ' ') for x in m.groups()]
+            infos = [self.graph.get_word_info(w) for w in [w1, w2, w3, w4]]
+            if all(infos):
+                # Check relationship types
+                def get_rel(a, b, info_a):
+                    if b in info_a['hypernyms'] or b in info_a['children']: return 'child'
+                    if b in info_a['hyponyms'] or b in info_a['parents']: return 'parent'
+                    if b in info_a['siblings']: return 'sibling'
+                    return None
+                
+                r1 = get_rel(w1, w2, infos[0])
+                r2 = get_rel(w3, w4, infos[2])
+                
+                if r1 and r2 and r1 == r2:
+                    return f"Valid analogy! Both are '{r1}' relationships."
+                elif r1 and r2:
+                    return f"Not quite: '{w1}→{w2}' is {r1}, but '{w3}→{w4}' is {r2}."
+            return "Cannot verify analogy."
+        
+        # Most complex - multiple patterns
+        if 'most complex' in q or ('complex' in q and 'most' in q):
+            best = max(self.graph.nodes.items(), key=lambda x: x[1]['complexity'] or 0)
+            return f"The most complex word is '{best[0]}' (C{best[1]['complexity']})."
+        
+        # Siblings/Similar
+        m = re.search(r'(?:siblings|similar) of\s+([a-z_]+)', q)
+        if m:
+            word = m.group(1).replace('_', ' ')
+            info = self.graph.get_word_info(word)
+            if info:
+                sibs = list(info['siblings'])[:5]
+                sims = list(info['similar'])[:5]
+                result = []
+                if sibs: result.append(f"Siblings: {', '.join(sibs)}")
+                if sims: result.append(f"Similar: {', '.join(sims)}")
+                return "; ".join(result) if result else f"No relationships found for '{word}'."
+        
+        return "Try asking about definitions, complexity, relationships, examples, paths, analogies, or 'is a' questions!"
 
 
 if __name__ == "__main__":
-    main()
+    # Build graph
+    graph = DictionaryGraph()
+    graph.build_graph()
+    
+    parser = QuestionParser(graph)
+    
+    # Demo questions
+    print("\n--- Q&A Demo ---\n")
+    demos = [
+        "What is the definition of life?",
+        "How complex is knowledge?",
+        "How is data related to information?",
+        "Explain the path from dog to reality",
+        "Is a dog an animal?",
+        "Give me an example of mammal",
+        "What is the most complex word?",
+        "Dog is to mammal as cat is to mammal"
+    ]
+    
+    for q in demos:
+        print(f"Q: {q}")
+        print(f"A: {parser.parse(q)}\n")
+    
+    # Show sample nodes
+    print("--- Sample Nodes ---\n")
+    for word in ['dog', 'mammal', 'knowledge', 'reality'][:4]:
+        node = graph.nodes[word]
+        print(f"{word} (C{node['complexity']}): {node['definition'][:60]}...")
+        print(f"  Hypernyms: {list(node['hypernyms'])[:3]}")
+        print(f"  Hyponyms: {list(node['hyponyms'])[:3]}")
+        print(f"  Siblings: {list(node['siblings'])[:3]}\n")
+    
+    # Interactive
+    print("Enter questions (type 'exit' to quit):")
+    while True:
+        try:
+            inp = input("\nQ: ").strip()
+            if inp.lower() == 'exit':
+                break
+            if inp:
+                print(f"A: {parser.parse(inp)}")
+        except EOFError:
+            break
