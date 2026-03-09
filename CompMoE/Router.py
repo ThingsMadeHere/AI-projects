@@ -1,9 +1,10 @@
 import numpy as np
 from enum import Enum
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, field
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+import networkx as nx
 
 # ==========================================
 # 1. REGIONS (Geometric Manifolds)
